@@ -1,0 +1,13 @@
+{
+  "tests": [
+    {
+      "name": "Parse ex-sound.ru without translation",
+      "method": "POST",
+      "path": "/",
+      "body": {"url": "ex-sound.ru", "translate": false},
+      "expectedStatus": 200,
+      "expectedBody": {"stats": {}},
+      "bodyMatcher": "partial"
+    }
+  ]
+}

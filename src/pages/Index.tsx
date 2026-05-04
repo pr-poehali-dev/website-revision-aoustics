@@ -1,158 +1,227 @@
 import React, { useState, useRef, useEffect } from "react";
 import Icon from "@/components/ui/icon";
 
+const PARSER_URL = "https://functions.poehali.dev/484bc619-46b0-40ce-89cb-17cc0beef597";
+
 // --- Types ---
 type LogLevel = "info" | "ok" | "warn" | "error" | "bitrix";
-type ContentFilter = "html" | "css" | "js" | "images" | "video" | "links" | "text";
 type ExportFormat = "json" | "xml" | "csv";
 type Tab = "config" | "results" | "logs" | "replacer";
 
 interface LogEntry {
   id: number;
-  ts: string;
   level: LogLevel;
   msg: string;
 }
 
-interface ParseResult {
-  type: ContentFilter;
-  count: number;
-  size: string;
-  items: string[];
+interface Block {
+  tag: string;
+  original: string;
+  translated: string;
 }
 
-// --- Mock data ---
-const MOCK_LOGS: Omit<LogEntry, "id">[] = [
-  { ts: "00:00.001", level: "info",   msg: "Инициализация парсера v2.4.1" },
-  { ts: "00:00.045", level: "info",   msg: "Подключение к URL: https://example-bitrix.ru" },
-  { ts: "00:00.312", level: "ok",     msg: "HTTP 200 OK — страница загружена (142 KB)" },
-  { ts: "00:00.451", level: "info",   msg: "Анализ DOM-структуры..." },
-  { ts: "00:00.612", level: "bitrix", msg: "[Bitrix] Обнаружен компонент: bitrix:menu (main_menu)" },
-  { ts: "00:00.638", level: "bitrix", msg: "[Bitrix] Обнаружен компонент: bitrix:catalog (catalog_section)" },
-  { ts: "00:00.714", level: "bitrix", msg: "[Bitrix] Обнаружен компонент: bitrix:form.result.new (callback_form)" },
-  { ts: "00:00.820", level: "ok",     msg: "HTML извлечён: 1 файл (142 KB)" },
-  { ts: "00:01.103", level: "info",   msg: "Поиск CSS ресурсов..." },
-  { ts: "00:01.244", level: "ok",     msg: "CSS извлечён: 4 файла (38.2 KB)" },
-  { ts: "00:01.540", level: "info",   msg: "Поиск JavaScript..." },
-  { ts: "00:01.892", level: "warn",   msg: "JS: обнаружен минифицированный файл без source map" },
-  { ts: "00:02.001", level: "ok",     msg: "JS извлечён: 7 файлов (214.5 KB)" },
-  { ts: "00:02.340", level: "info",   msg: "Сканирование медиафайлов..." },
-  { ts: "00:02.891", level: "ok",     msg: "Изображения: 23 файла (1.4 MB)" },
-  { ts: "00:03.100", level: "warn",   msg: "Видео: 2 файла недоступны (403 Forbidden)" },
-  { ts: "00:03.200", level: "info",   msg: "Извлечение ссылок..." },
-  { ts: "00:03.450", level: "ok",     msg: "Ссылок найдено: 87 (внутренних: 64, внешних: 23)" },
-  { ts: "00:03.780", level: "info",   msg: "Генерация структуры JSON..." },
-  { ts: "00:04.012", level: "ok",     msg: "Парсинг завершён успешно. Время: 4.01 сек." },
-];
+interface ParseData {
+  url: string;
+  meta: { title: string; description: string };
+  blocks: Block[];
+  links: string[];
+  bitrix_components: string[];
+  stats: {
+    total_blocks: number;
+    total_links: number;
+    bitrix_count: number;
+    html_size_kb: number;
+  };
+}
 
-const MOCK_RESULTS: ParseResult[] = [
-  { type: "html",   count: 1,   size: "142 KB",   items: ["index.html"] },
-  { type: "css",    count: 4,   size: "38.2 KB",  items: ["style.css", "bitrix.css", "theme.css", "responsive.css"] },
-  { type: "js",     count: 7,   size: "214.5 KB", items: ["jquery.min.js", "bx.js", "main.js", "slider.js", "form.js", "analytics.js", "polyfills.js"] },
-  { type: "images", count: 23,  size: "1.4 MB",   items: ["logo.svg", "hero.jpg", "bg-pattern.png", "catalog-01.jpg", "catalog-02.jpg", "...+18 файлов"] },
-  { type: "video",  count: 1,   size: "0 B",      items: ["video-intro.mp4 (403 Forbidden)"] },
-  { type: "links",  count: 87,  size: "",         items: ["/about", "/catalog", "/contacts", "https://vk.com/...", "...+83 ссылки"] },
-  { type: "text",   count: 142, size: "24.1 KB",  items: ["H1 (3 шт)", "H2 (12 шт)", "Параграфы (127 шт)"] },
-];
-
-const CONTENT_FILTERS: { id: ContentFilter; label: string; icon: string; color: string }[] = [
-  { id: "html",   label: "HTML",        icon: "Code2",      color: "text-orange-400" },
-  { id: "css",    label: "CSS",         icon: "Paintbrush", color: "text-blue-400" },
-  { id: "js",     label: "JavaScript",  icon: "Zap",        color: "text-yellow-400" },
-  { id: "images", label: "Изображения", icon: "Image",      color: "text-purple-400" },
-  { id: "video",  label: "Видео",       icon: "Play",       color: "text-red-400" },
-  { id: "links",  label: "Ссылки",      icon: "Link2",      color: "text-cyan-400" },
-  { id: "text",   label: "Текст",       icon: "AlignLeft",  color: "text-green-400" },
-];
-
-const BITRIX_COMPONENTS = [
-  "bitrix:menu", "bitrix:catalog", "bitrix:catalog.section",
-  "bitrix:catalog.element", "bitrix:news", "bitrix:form.result.new",
-  "bitrix:search.result", "bitrix:iblock.list",
-];
-
-// --- Small helpers ---
+// --- Helpers ---
 function Panel({ children, className = "" }: { children: React.ReactNode; className?: string }) {
-  return (
-    <div className={`bg-card border border-border rounded-sm ${className}`}>
-      {children}
-    </div>
-  );
+  return <div className={`bg-card border border-border rounded-sm ${className}`}>{children}</div>;
 }
 
 function SectionHeader({ title, subtitle }: { title: string; subtitle?: string }) {
   return (
     <div className="mb-4">
-      <h2 className="text-xs font-mono font-semibold uppercase tracking-widest text-muted-foreground">
-        {title}
-      </h2>
+      <h2 className="text-xs font-mono font-semibold uppercase tracking-widest text-muted-foreground">{title}</h2>
       {subtitle && <p className="text-xs text-muted-foreground/50 mt-0.5">{subtitle}</p>}
     </div>
   );
 }
 
-function ToggleSwitch({ defaultChecked = false }: { defaultChecked?: boolean }) {
-  const [on, setOn] = useState(defaultChecked);
+function ToggleSwitch({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
   return (
     <button
-      onClick={() => setOn(!on)}
-      className={`w-8 h-4 rounded-full relative transition-colors shrink-0 ${on ? "bg-[hsl(var(--green))]" : "bg-muted border border-border"}`}
+      onClick={() => onChange(!checked)}
+      className={`w-8 h-4 rounded-full relative transition-colors shrink-0 ${checked ? "bg-[hsl(var(--green))]" : "bg-muted border border-border"}`}
     >
-      <span className={`absolute top-0.5 w-3 h-3 rounded-full bg-white shadow transition-transform ${on ? "translate-x-4" : "translate-x-0.5"}`} />
+      <span className={`absolute top-0.5 w-3 h-3 rounded-full bg-white shadow transition-transform ${checked ? "translate-x-4" : "translate-x-0.5"}`} />
     </button>
   );
 }
 
+function toXml(data: ParseData): string {
+  const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const blocks = data.blocks.map(b =>
+    `  <block tag="${esc(b.tag)}">
+    <original>${esc(b.original)}</original>
+    <translated>${esc(b.translated)}</translated>
+  </block>`).join("\n");
+  const links = data.links.map(l => `  <link>${esc(l)}</link>`).join("\n");
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<site url="${esc(data.url)}">
+  <meta>
+    <title>${esc(data.meta.title)}</title>
+    <description>${esc(data.meta.description)}</description>
+  </meta>
+  <blocks>
+${blocks}
+  </blocks>
+  <links>
+${links}
+  </links>
+</site>`;
+}
+
+function toCsv(data: ParseData): string {
+  const header = "tag,original,translated";
+  const rows = data.blocks.map(b =>
+    [b.tag, `"${b.original.replace(/"/g, '""')}"`, `"${b.translated.replace(/"/g, '""')}"`].join(",")
+  );
+  return [header, ...rows].join("\n");
+}
+
+function downloadFile(content: string, filename: string, mime: string) {
+  const blob = new Blob([content], { type: mime });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  a.click();
+}
+
 // --- Main ---
 export default function Index() {
-  const [url, setUrl] = useState("https://");
+  const [url, setUrl] = useState("https://ex-sound.ru");
   const [activeTab, setActiveTab] = useState<Tab>("config");
   const [running, setRunning] = useState(false);
   const [parsed, setParsed] = useState(false);
   const [progress, setProgress] = useState(0);
   const [logs, setLogs] = useState<LogEntry[]>([]);
-  const [activeFilters, setActiveFilters] = useState<ContentFilter[]>(
-    ["html", "css", "js", "images", "links", "text"]
-  );
+  const [parseData, setParseData] = useState<ParseData | null>(null);
   const [exportFormat, setExportFormat] = useState<ExportFormat>("json");
-  const [expandedResult, setExpandedResult] = useState<ContentFilter | null>(null);
+  const [expandedBlock, setExpandedBlock] = useState<string | null>(null);
+  const [doTranslate, setDoTranslate] = useState(true);
+  const [sourceLang, setSourceLang] = useState("русского");
+  const [targetLang, setTargetLang] = useState("словенский");
+  const [targetSite, setTargetSite] = useState("https://acoustics.si");
   const [replacerRows, setReplacerRows] = useState([
-    { from: "", to: "" },
+    { from: "ex-sound.ru", to: "acoustics.si" },
     { from: "", to: "" },
   ]);
-  const [detectBitrix, setDetectBitrix] = useState(true);
   const logsEndRef = useRef<HTMLDivElement>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const logIdRef = useRef(0);
 
   useEffect(() => {
     logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [logs]);
 
-  function toggleFilter(f: ContentFilter) {
-    setActiveFilters(prev =>
-      prev.includes(f) ? prev.filter(x => x !== f) : [...prev, f]
-    );
+  function addLog(level: LogLevel, msg: string) {
+    setLogs(prev => [...prev, { id: logIdRef.current++, level, msg }]);
   }
 
-  function startParsing() {
-    if (url.length < 12) return;
+  async function startParsing() {
+    if (running || url.length < 8) return;
+    abortRef.current = new AbortController();
     setRunning(true);
     setParsed(false);
+    setParseData(null);
     setLogs([]);
-    setProgress(0);
+    logIdRef.current = 0;
+    setProgress(10);
     setActiveTab("logs");
-    let i = 0;
-    const iv = setInterval(() => {
-      if (i < MOCK_LOGS.length) {
-        setLogs(prev => [...prev, { ...MOCK_LOGS[i], id: i }]);
-        setProgress(Math.round(((i + 1) / MOCK_LOGS.length) * 100));
-        i++;
-      } else {
-        clearInterval(iv);
+
+    addLog("info", "Инициализация парсера v2.4.1");
+    addLog("info", `Подключение к ${url}...`);
+    if (doTranslate) {
+      addLog("info", `Перевод: ${sourceLang} → ${targetLang}`);
+    }
+
+    try {
+      setProgress(20);
+      const res = await fetch(PARSER_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          url,
+          translate: doTranslate,
+          source_lang: sourceLang,
+          target_lang: targetLang,
+        }),
+        signal: abortRef.current.signal,
+      });
+
+      setProgress(80);
+      const data = await res.json();
+
+      if (data.error) {
+        addLog("error", `Ошибка: ${data.error}`);
+        // Show backend logs too
+        if (data.logs) {
+          data.logs.forEach((l: { level: LogLevel; msg: string }) => addLog(l.level, l.msg));
+        }
         setRunning(false);
-        setParsed(true);
-        setTimeout(() => setActiveTab("results"), 500);
+        return;
       }
-    }, 200);
+
+      // Show backend logs
+      if (data.logs) {
+        data.logs.forEach((l: { level: LogLevel; msg: string }) => addLog(l.level, l.msg));
+      }
+
+      setProgress(100);
+      setParseData(data);
+      setParsed(true);
+      setTimeout(() => setActiveTab("results"), 600);
+    } catch (e: unknown) {
+      if (e instanceof Error && e.name !== "AbortError") {
+        addLog("error", `Сетевая ошибка: ${e.message}`);
+      } else {
+        addLog("warn", "Парсинг остановлен пользователем");
+      }
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  function stopParsing() {
+    abortRef.current?.abort();
+    setRunning(false);
+  }
+
+  function handleExport() {
+    if (!parseData) return;
+
+    // Apply replacer rules
+    let processedData = { ...parseData };
+    const activeRules = replacerRows.filter(r => r.from && r.to);
+    if (activeRules.length > 0) {
+      processedData = {
+        ...processedData,
+        blocks: processedData.blocks.map(b => ({
+          ...b,
+          translated: activeRules.reduce((t, r) => t.split(r.from).join(r.to), b.translated),
+          original: activeRules.reduce((t, r) => t.split(r.from).join(r.to), b.original),
+        })),
+      };
+    }
+
+    if (exportFormat === "json") {
+      downloadFile(JSON.stringify(processedData, null, 2), "parsed-content.json", "application/json");
+    } else if (exportFormat === "xml") {
+      downloadFile(toXml(processedData), "parsed-content.xml", "application/xml");
+    } else {
+      downloadFile(toCsv(processedData), "parsed-content.csv", "text/csv");
+    }
   }
 
   const TABS: { id: Tab; label: string; icon: string }[] = [
@@ -162,7 +231,17 @@ export default function Index() {
     { id: "replacer", label: "Замена текста", icon: "Replace" },
   ];
 
-  const visibleResults = MOCK_RESULTS.filter(r => activeFilters.includes(r.type));
+  // Group blocks by tag for display
+  const blocksByTag = parseData
+    ? Object.entries(
+        parseData.blocks.reduce((acc, b) => {
+          const key = b.tag || "text";
+          if (!acc[key]) acc[key] = [];
+          acc[key].push(b);
+          return acc;
+        }, {} as Record<string, Block[]>)
+      )
+    : [];
 
   return (
     <div className="min-h-screen bg-background text-foreground flex flex-col font-sans">
@@ -194,29 +273,31 @@ export default function Index() {
       {/* URL Bar */}
       <div className="border-b border-border bg-card/50">
         <div className="max-w-screen-xl mx-auto px-6 py-3 flex gap-3 items-center">
+          <div className="flex items-center gap-1.5 text-xs font-mono text-muted-foreground shrink-0">
+            <Icon name="Globe" size={13} />
+            <span>Источник:</span>
+          </div>
           <div className="flex-1 flex items-center gap-2 bg-muted border border-border rounded-sm px-3 h-9 focus-within:border-[hsl(var(--green))] transition-colors">
-            <Icon name="Globe" size={13} className="text-muted-foreground shrink-0" />
             <input
               className="flex-1 bg-transparent text-sm font-mono outline-none placeholder:text-muted-foreground/40"
-              placeholder="https://your-bitrix-site.ru"
+              placeholder="https://ex-sound.ru"
               value={url}
               onChange={e => setUrl(e.target.value)}
               onKeyDown={e => e.key === "Enter" && startParsing()}
             />
-            {url.length > 8 && (
-              <button onClick={() => setUrl("https://")} className="text-muted-foreground hover:text-foreground transition-colors">
-                <Icon name="X" size={12} />
-              </button>
-            )}
           </div>
-          <select className="h-9 bg-muted border border-border rounded-sm px-2 text-xs font-mono text-foreground outline-none focus:border-[hsl(var(--green))] transition-colors">
-            <option value="ru">RU</option>
-            <option value="en">EN</option>
-            <option value="de">DE</option>
-          </select>
+          <Icon name="ArrowRight" size={14} className="text-muted-foreground shrink-0" />
+          <div className="flex items-center gap-2 bg-muted border border-border rounded-sm px-3 h-9 w-48 focus-within:border-[hsl(var(--green))] transition-colors">
+            <input
+              className="flex-1 bg-transparent text-sm font-mono outline-none placeholder:text-muted-foreground/40"
+              placeholder="https://acoustics.si"
+              value={targetSite}
+              onChange={e => setTargetSite(e.target.value)}
+            />
+          </div>
           {running ? (
             <button
-              onClick={() => setRunning(false)}
+              onClick={stopParsing}
               className="h-9 px-4 bg-destructive text-white text-xs font-mono rounded-sm flex items-center gap-2 hover:opacity-90 transition-opacity"
             >
               <Icon name="Square" size={12} />
@@ -225,7 +306,7 @@ export default function Index() {
           ) : (
             <button
               onClick={startParsing}
-              disabled={url.length < 12}
+              disabled={url.length < 8}
               className="h-9 px-5 bg-[hsl(var(--green))] text-black text-xs font-mono font-semibold rounded-sm flex items-center gap-2 hover:opacity-90 transition-opacity disabled:opacity-40 disabled:cursor-not-allowed"
             >
               <Icon name="Play" size={12} />
@@ -236,12 +317,9 @@ export default function Index() {
         {running && (
           <div className="max-w-screen-xl mx-auto px-6 pb-3">
             <div className="h-0.5 bg-muted rounded-full overflow-hidden">
-              <div
-                className="h-full bg-[hsl(var(--green))] transition-all duration-200"
-                style={{ width: `${progress}%` }}
-              />
+              <div className="h-full bg-[hsl(var(--green))] transition-all duration-500" style={{ width: `${progress}%` }} />
             </div>
-            <p className="text-xs font-mono text-muted-foreground mt-1">{progress}% — обработка страницы...</p>
+            <p className="text-xs font-mono text-muted-foreground mt-1">{progress}% — {progress < 30 ? "загрузка страницы..." : progress < 85 ? "извлечение и перевод текстов..." : "финализация..."}</p>
           </div>
         )}
       </div>
@@ -252,56 +330,66 @@ export default function Index() {
         {/* Sidebar */}
         <aside className="w-52 shrink-0 space-y-3 animate-fade-in">
 
-          {/* Filters */}
+          {/* Translation settings */}
           <Panel>
-            <div className="px-3 pt-3 pb-2 border-b border-border">
-              <p className="text-xs font-mono font-semibold uppercase tracking-widest text-muted-foreground">Контент</p>
+            <div className="px-3 pt-3 pb-2 border-b border-border flex items-center justify-between">
+              <p className="text-xs font-mono font-semibold uppercase tracking-widest text-muted-foreground">Перевод</p>
+              <ToggleSwitch checked={doTranslate} onChange={setDoTranslate} />
             </div>
-            <div className="p-2 space-y-px">
-              {CONTENT_FILTERS.map(f => (
-                <button
-                  key={f.id}
-                  onClick={() => toggleFilter(f.id)}
-                  className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-sm text-xs font-mono transition-colors ${
-                    activeFilters.includes(f.id)
-                      ? "bg-muted/70 text-foreground"
-                      : "text-muted-foreground hover:text-foreground hover:bg-muted/30"
-                  }`}
+            <div className="p-3 space-y-2">
+              <div>
+                <label className="text-xs text-muted-foreground block mb-1">Источник</label>
+                <select
+                  value={sourceLang}
+                  onChange={e => setSourceLang(e.target.value)}
+                  className="w-full h-7 bg-muted border border-border rounded-sm px-2 text-xs font-mono text-foreground outline-none focus:border-[hsl(var(--green))] transition-colors"
                 >
-                  <span className={`w-1 h-1 rounded-full shrink-0 ${activeFilters.includes(f.id) ? "bg-[hsl(var(--green))]" : "bg-muted-foreground/30"}`} />
-                  <Icon name={f.icon} size={12} className={activeFilters.includes(f.id) ? f.color : ""} />
-                  <span className="flex-1 text-left">{f.label}</span>
-                  {parsed && (
-                    <span className="text-muted-foreground/50 tabular-nums">
-                      {MOCK_RESULTS.find(r => r.type === f.id)?.count ?? 0}
-                    </span>
-                  )}
-                </button>
-              ))}
+                  <option value="русского">Русский</option>
+                  <option value="английского">Английский</option>
+                  <option value="немецкого">Немецкий</option>
+                </select>
+              </div>
+              <div>
+                <label className="text-xs text-muted-foreground block mb-1">Перевести на</label>
+                <select
+                  value={targetLang}
+                  onChange={e => setTargetLang(e.target.value)}
+                  className="w-full h-7 bg-muted border border-border rounded-sm px-2 text-xs font-mono text-foreground outline-none focus:border-[hsl(var(--green))] transition-colors"
+                >
+                  <option value="словенский">Словенский</option>
+                  <option value="английский">Английский</option>
+                  <option value="немецкий">Немецкий</option>
+                  <option value="французский">Французский</option>
+                  <option value="испанский">Испанский</option>
+                </select>
+              </div>
+              {!doTranslate && (
+                <p className="text-xs text-muted-foreground/40 italic">перевод отключён</p>
+              )}
             </div>
           </Panel>
 
-          {/* Bitrix */}
-          <Panel>
-            <div className="px-3 pt-3 pb-2 border-b border-border flex items-center justify-between">
-              <p className="text-xs font-mono font-semibold uppercase tracking-widest text-muted-foreground">Bitrix</p>
-              <button
-                onClick={() => setDetectBitrix(!detectBitrix)}
-                className={`w-8 h-4 rounded-full relative transition-colors ${detectBitrix ? "bg-[hsl(var(--green))]" : "bg-muted border border-border"}`}
-              >
-                <span className={`absolute top-0.5 w-3 h-3 rounded-full bg-white shadow transition-transform ${detectBitrix ? "translate-x-4" : "translate-x-0.5"}`} />
-              </button>
-            </div>
-            <div className="p-3 space-y-1.5">
-              {BITRIX_COMPONENTS.slice(0, detectBitrix ? 6 : 2).map(c => (
-                <div key={c} className={`text-xs font-mono flex items-center gap-1.5 ${detectBitrix ? "text-purple-400/80" : "text-muted-foreground/40"}`}>
-                  <span className="w-1 h-1 rounded-full bg-current shrink-0" />
-                  {c}
-                </div>
-              ))}
-              {!detectBitrix && <p className="text-xs text-muted-foreground/30 italic">режим отключён</p>}
-            </div>
-          </Panel>
+          {/* Stats */}
+          {parsed && parseData && (
+            <Panel className="animate-fade-in">
+              <div className="px-3 pt-3 pb-2 border-b border-border">
+                <p className="text-xs font-mono font-semibold uppercase tracking-widest text-muted-foreground">Статистика</p>
+              </div>
+              <div className="p-3 space-y-2">
+                {[
+                  { label: "Блоков текста", val: parseData.stats.total_blocks, color: "text-green" },
+                  { label: "Ссылок", val: parseData.stats.total_links, color: "text-cyan-400" },
+                  { label: "Bitrix компон.", val: parseData.stats.bitrix_count, color: "text-purple-400" },
+                  { label: "Размер HTML", val: `${parseData.stats.html_size_kb} KB`, color: "text-blue-400" },
+                ].map(s => (
+                  <div key={s.label} className="flex items-center justify-between">
+                    <span className="text-xs text-muted-foreground">{s.label}</span>
+                    <span className={`text-xs font-mono font-semibold ${s.color}`}>{s.val}</span>
+                  </div>
+                ))}
+              </div>
+            </Panel>
+          )}
 
           {/* Export */}
           <Panel>
@@ -326,6 +414,7 @@ export default function Index() {
               ))}
               <button
                 disabled={!parsed}
+                onClick={handleExport}
                 className="w-full h-8 mt-1 bg-[hsl(var(--green))] text-black text-xs font-mono font-semibold rounded-sm flex items-center justify-center gap-1.5 hover:opacity-90 transition-opacity disabled:opacity-30 disabled:cursor-not-allowed"
               >
                 <Icon name="Download" size={12} />
@@ -355,6 +444,9 @@ export default function Index() {
                 {tab.id === "logs" && logs.length > 0 && (
                   <span className="ml-0.5 px-1 bg-muted rounded text-muted-foreground">{logs.length}</span>
                 )}
+                {tab.id === "results" && parseData && (
+                  <span className="ml-0.5 px-1 bg-[hsl(var(--green))]/20 rounded text-green">{parseData.stats.total_blocks}</span>
+                )}
               </button>
             ))}
           </div>
@@ -362,71 +454,82 @@ export default function Index() {
           {/* CONFIG */}
           {activeTab === "config" && (
             <div className="animate-fade-in space-y-4">
-              <div className="grid grid-cols-2 gap-4">
-                <Panel className="p-4 space-y-3">
-                  <SectionHeader title="Параметры парсинга" subtitle="Глубина, задержки, лимиты" />
-                  {[
-                    { label: "Глубина сканирования", val: "3",   unit: "уровней" },
-                    { label: "Задержка между запросами", val: "500", unit: "мс" },
-                    { label: "Максимум страниц",    val: "100",  unit: "шт" },
-                    { label: "Таймаут соединения",  val: "15",   unit: "сек" },
-                  ].map(row => (
-                    <div key={row.label} className="flex items-center justify-between gap-3">
-                      <label className="text-xs text-muted-foreground">{row.label}</label>
-                      <div className="flex items-center gap-1.5 shrink-0">
-                        <input
-                          defaultValue={row.val}
-                          className="w-14 h-7 bg-muted border border-border rounded-sm px-2 text-xs font-mono text-right outline-none focus:border-[hsl(var(--green))] transition-colors"
-                        />
-                        <span className="text-xs text-muted-foreground/50 w-12">{row.unit}</span>
-                      </div>
-                    </div>
-                  ))}
-                </Panel>
-
-                <Panel className="p-4 space-y-3">
-                  <SectionHeader title="Опции" subtitle="Дополнительные параметры" />
-                  {[
-                    { label: "Следовать редиректам",       on: true  },
-                    { label: "Игнорировать robots.txt",    on: false },
-                    { label: "Парсить скрытые элементы",   on: false },
-                    { label: "Сохранять структуру URL",    on: true  },
-                    { label: "Распознавать Bitrix-теги",   on: true  },
-                    { label: "Авто-определение языка",     on: true  },
-                  ].map(opt => (
-                    <div key={opt.label} className="flex items-center justify-between gap-3">
-                      <label className="text-xs text-muted-foreground">{opt.label}</label>
-                      <ToggleSwitch defaultChecked={opt.on} />
-                    </div>
-                  ))}
-                </Panel>
-              </div>
-
               <Panel className="p-4">
-                <SectionHeader title="Заголовки HTTP" />
-                <div className="grid grid-cols-2 gap-3">
+                <SectionHeader title="Задание парсинга" subtitle="Источник и цель" />
+                <div className="grid grid-cols-2 gap-4">
                   <div>
-                    <label className="text-xs text-muted-foreground block mb-1">User-Agent</label>
+                    <label className="text-xs text-muted-foreground block mb-1">Сайт-источник</label>
                     <input
                       className="w-full h-8 bg-muted border border-border rounded-sm px-3 text-xs font-mono outline-none focus:border-[hsl(var(--green))] transition-colors"
-                      defaultValue="Mozilla/5.0 (compatible; SiteParser/2.4)"
+                      value={url}
+                      onChange={e => setUrl(e.target.value)}
                     />
                   </div>
                   <div>
-                    <label className="text-xs text-muted-foreground block mb-1">Authorization Bearer</label>
+                    <label className="text-xs text-muted-foreground block mb-1">Целевой сайт</label>
                     <input
-                      type="password"
                       className="w-full h-8 bg-muted border border-border rounded-sm px-3 text-xs font-mono outline-none focus:border-[hsl(var(--green))] transition-colors"
-                      placeholder="Токен (опционально)"
+                      value={targetSite}
+                      onChange={e => setTargetSite(e.target.value)}
                     />
                   </div>
                 </div>
               </Panel>
 
+              <div className="grid grid-cols-2 gap-4">
+                <Panel className="p-4 space-y-3">
+                  <SectionHeader title="Перевод" />
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs text-muted-foreground">Включить перевод</label>
+                    <ToggleSwitch checked={doTranslate} onChange={setDoTranslate} />
+                  </div>
+                  <div>
+                    <label className="text-xs text-muted-foreground block mb-1">Язык источника</label>
+                    <select
+                      value={sourceLang}
+                      onChange={e => setSourceLang(e.target.value)}
+                      className="w-full h-8 bg-muted border border-border rounded-sm px-2 text-xs font-mono text-foreground outline-none"
+                    >
+                      <option value="русского">Русский</option>
+                      <option value="английского">Английский</option>
+                      <option value="немецкого">Немецкий</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-xs text-muted-foreground block mb-1">Язык перевода</label>
+                    <select
+                      value={targetLang}
+                      onChange={e => setTargetLang(e.target.value)}
+                      className="w-full h-8 bg-muted border border-border rounded-sm px-2 text-xs font-mono text-foreground outline-none"
+                    >
+                      <option value="словенский">Словенский</option>
+                      <option value="английский">Английский</option>
+                      <option value="немецкий">Немецкий</option>
+                      <option value="французский">Французский</option>
+                    </select>
+                  </div>
+                </Panel>
+
+                <Panel className="p-4 space-y-3">
+                  <SectionHeader title="Параметры" />
+                  {[
+                    { label: "Следовать редиректам",   on: true  },
+                    { label: "Распознавать Bitrix-теги", on: true },
+                    { label: "Авто-определение кодировки", on: true },
+                    { label: "Лимит: 120 блоков",      on: true  },
+                  ].map(opt => (
+                    <div key={opt.label} className="flex items-center justify-between gap-3">
+                      <label className="text-xs text-muted-foreground">{opt.label}</label>
+                      <ToggleSwitch checked={opt.on} onChange={() => {}} />
+                    </div>
+                  ))}
+                </Panel>
+              </div>
+
               <div className="flex justify-end">
                 <button
                   onClick={startParsing}
-                  disabled={url.length < 12}
+                  disabled={url.length < 8 || running}
                   className="h-9 px-6 bg-[hsl(var(--green))] text-black text-xs font-mono font-semibold rounded-sm flex items-center gap-2 hover:opacity-90 transition-opacity disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                   <Icon name="Play" size={13} />
@@ -439,7 +542,7 @@ export default function Index() {
           {/* RESULTS */}
           {activeTab === "results" && (
             <div className="animate-fade-in space-y-3">
-              {!parsed ? (
+              {!parsed || !parseData ? (
                 <div className="flex flex-col items-center justify-center py-24 text-center">
                   <div className="w-12 h-12 border border-border rounded-sm flex items-center justify-center mb-4">
                     <Icon name="Scan" size={22} className="text-muted-foreground" />
@@ -449,62 +552,100 @@ export default function Index() {
                 </div>
               ) : (
                 <>
-                  <div className="grid grid-cols-4 gap-3">
-                    {[
-                      { label: "Файлов найдено",     val: "243",      icon: "Files",     color: "text-green" },
-                      { label: "Bitrix-компонентов", val: "3",        icon: "Layers",    color: "text-purple-400" },
-                      { label: "Общий объём",        val: "1.82 MB",  icon: "HardDrive", color: "text-blue-400" },
-                      { label: "Время парсинга",     val: "4.01 сек", icon: "Timer",     color: "text-amber" },
-                    ].map((s, i) => (
-                      <Panel key={s.label} className="p-3 animate-fade-in" style={{ animationDelay: `${i * 60}ms` } as React.CSSProperties}>
-                        <div className="flex items-start justify-between">
-                          <div>
-                            <p className="text-xs text-muted-foreground mb-1">{s.label}</p>
-                            <p className={`text-lg font-mono font-semibold ${s.color}`}>{s.val}</p>
-                          </div>
-                          <Icon name={s.icon} size={15} className="text-muted-foreground/30 mt-0.5" />
-                        </div>
-                      </Panel>
-                    ))}
-                  </div>
+                  {/* Meta */}
+                  <Panel className="p-4">
+                    <p className="text-xs font-mono text-muted-foreground uppercase tracking-widest mb-2">Метаданные страницы</p>
+                    <div className="space-y-1">
+                      <div className="flex gap-3">
+                        <span className="text-xs font-mono text-muted-foreground/60 w-20 shrink-0">title</span>
+                        <span className="text-xs font-mono text-foreground">{parseData.meta.title || "—"}</span>
+                      </div>
+                      <div className="flex gap-3">
+                        <span className="text-xs font-mono text-muted-foreground/60 w-20 shrink-0">description</span>
+                        <span className="text-xs font-mono text-muted-foreground">{parseData.meta.description || "—"}</span>
+                      </div>
+                      <div className="flex gap-3">
+                        <span className="text-xs font-mono text-muted-foreground/60 w-20 shrink-0">url</span>
+                        <a href={parseData.url} target="_blank" rel="noopener noreferrer" className="text-xs font-mono text-cyan-400 hover:underline">{parseData.url}</a>
+                      </div>
+                    </div>
+                  </Panel>
 
-                  <div className="space-y-1.5">
-                    {visibleResults.map(r => {
-                      const fm = CONTENT_FILTERS.find(f => f.id === r.type)!;
-                      const open = expandedResult === r.type;
-                      return (
-                        <Panel key={r.type} className="overflow-hidden">
+                  {/* Bitrix */}
+                  {parseData.bitrix_components.length > 0 && (
+                    <Panel className="p-4 animate-fade-in">
+                      <p className="text-xs font-mono text-muted-foreground uppercase tracking-widest mb-2">Bitrix-компоненты ({parseData.bitrix_components.length})</p>
+                      <div className="flex flex-wrap gap-2">
+                        {parseData.bitrix_components.map(c => (
+                          <span key={c} className="text-xs font-mono text-purple-400 bg-purple-400/10 px-2 py-0.5 rounded-sm border border-purple-400/20">{c}</span>
+                        ))}
+                      </div>
+                    </Panel>
+                  )}
+
+                  {/* Text blocks grouped by tag */}
+                  <Panel>
+                    <div className="px-4 pt-3 pb-2 border-b border-border flex items-center justify-between">
+                      <p className="text-xs font-mono font-semibold uppercase tracking-widest text-muted-foreground">
+                        Текстовые блоки ({parseData.blocks.length})
+                      </p>
+                      <span className="text-xs font-mono text-muted-foreground/50">оригинал → перевод</span>
+                    </div>
+                    <div className="divide-y divide-border max-h-[420px] overflow-y-auto scrollbar-thin">
+                      {blocksByTag.map(([tag, blocks]) => (
+                        <div key={tag}>
                           <button
-                            onClick={() => setExpandedResult(open ? null : r.type)}
-                            className="w-full px-4 py-3 flex items-center gap-3 hover:bg-muted/20 transition-colors"
+                            onClick={() => setExpandedBlock(expandedBlock === tag ? null : tag)}
+                            className="w-full px-4 py-2.5 flex items-center gap-2 hover:bg-muted/20 transition-colors"
                           >
-                            <Icon name={fm.icon} size={13} className={fm.color} />
-                            <span className="text-sm font-mono">{fm.label}</span>
-                            <span className="text-xs text-muted-foreground font-mono">
-                              {r.count} {r.count === 1 ? "файл" : r.count < 5 ? "файла" : "файлов"}
-                            </span>
-                            {r.size && (
-                              <span className="text-xs font-mono text-muted-foreground/50 bg-muted px-1.5 py-px rounded-sm">
-                                {r.size}
-                              </span>
-                            )}
-                            <Icon name={open ? "ChevronUp" : "ChevronDown"} size={12} className="ml-auto text-muted-foreground" />
+                            <span className="text-xs font-mono text-muted-foreground/60 bg-muted px-1.5 py-px rounded-sm w-12 text-center">{tag}</span>
+                            <span className="text-xs font-mono text-muted-foreground">{blocks.length} блок{blocks.length === 1 ? "" : blocks.length < 5 ? "а" : "ов"}</span>
+                            <Icon name={expandedBlock === tag ? "ChevronUp" : "ChevronDown"} size={11} className="ml-auto text-muted-foreground" />
                           </button>
-                          {open && (
-                            <div className="border-t border-border px-4 py-3 bg-muted/10 animate-fade-in">
-                              <div className="flex flex-wrap gap-2">
-                                {r.items.map(item => (
-                                  <span key={item} className="text-xs font-mono text-muted-foreground bg-muted px-2 py-1 rounded-sm border border-border">
-                                    {item}
-                                  </span>
-                                ))}
-                              </div>
+                          {expandedBlock === tag && (
+                            <div className="animate-fade-in">
+                              {blocks.slice(0, 20).map((b, i) => (
+                                <div key={i} className="px-4 py-2.5 border-t border-border/50 grid grid-cols-2 gap-4 bg-muted/5">
+                                  <p className="text-xs text-muted-foreground/80 font-mono leading-relaxed">{b.original}</p>
+                                  <p className="text-xs text-foreground font-mono leading-relaxed">{b.translated || <span className="text-muted-foreground/30 italic">—</span>}</p>
+                                </div>
+                              ))}
+                              {blocks.length > 20 && (
+                                <div className="px-4 py-2 text-xs font-mono text-muted-foreground/40 text-center border-t border-border/50">
+                                  +{blocks.length - 20} блоков — скачайте файл для полного списка
+                                </div>
+                              )}
                             </div>
                           )}
-                        </Panel>
-                      );
-                    })}
-                  </div>
+                        </div>
+                      ))}
+                    </div>
+                  </Panel>
+
+                  {/* Links */}
+                  {parseData.links.length > 0 && (
+                    <Panel className="animate-fade-in">
+                      <button
+                        onClick={() => setExpandedBlock(expandedBlock === "links" ? null : "links")}
+                        className="w-full px-4 py-3 flex items-center gap-2 hover:bg-muted/20 transition-colors"
+                      >
+                        <Icon name="Link2" size={13} className="text-cyan-400" />
+                        <span className="text-sm font-mono">Ссылки</span>
+                        <span className="text-xs font-mono text-muted-foreground">{parseData.links.length} шт</span>
+                        <Icon name={expandedBlock === "links" ? "ChevronUp" : "ChevronDown"} size={11} className="ml-auto text-muted-foreground" />
+                      </button>
+                      {expandedBlock === "links" && (
+                        <div className="border-t border-border px-4 py-3 animate-fade-in flex flex-wrap gap-1.5">
+                          {parseData.links.slice(0, 30).map(l => (
+                            <span key={l} className="text-xs font-mono text-cyan-400/70 bg-cyan-400/5 px-1.5 py-0.5 rounded-sm border border-cyan-400/15">{l}</span>
+                          ))}
+                          {parseData.links.length > 30 && (
+                            <span className="text-xs font-mono text-muted-foreground/40">+{parseData.links.length - 30} ещё</span>
+                          )}
+                        </div>
+                      )}
+                    </Panel>
+                  )}
                 </>
               )}
             </div>
@@ -522,15 +663,11 @@ export default function Index() {
                     </span>
                   ))}
                 </div>
-                <button
-                  onClick={() => setLogs([])}
-                  className="text-xs font-mono text-muted-foreground hover:text-foreground transition-colors flex items-center gap-1"
-                >
+                <button onClick={() => setLogs([])} className="text-xs font-mono text-muted-foreground hover:text-foreground transition-colors flex items-center gap-1">
                   <Icon name="Trash2" size={11} />
                   Очистить
                 </button>
               </div>
-
               <Panel>
                 <div className="h-[460px] overflow-y-auto scrollbar-thin p-4 space-y-1">
                   {logs.length === 0 ? (
@@ -538,9 +675,8 @@ export default function Index() {
                       <p className="text-xs font-mono text-muted-foreground/30">Журнал пуст — запустите парсинг</p>
                     </div>
                   ) : (
-                    logs.filter(log => log && log.level).map(log => (
+                    logs.filter(l => l && l.level).map(log => (
                       <div key={log.id} className={`log-line ${log.level} animate-slide-in`}>
-                        <span className="text-muted-foreground/30 mr-3 select-none">{log.ts}</span>
                         <span className="mr-2 opacity-50">[{log.level.toUpperCase()}]</span>
                         {log.msg}
                       </div>
@@ -563,7 +699,7 @@ export default function Index() {
               <Panel className="p-4">
                 <SectionHeader
                   title="Автозамена текста"
-                  subtitle="Замените название компании, домены или любой текст перед экспортом"
+                  subtitle="Правила применяются при экспорте файла"
                 />
                 <div className="space-y-2">
                   <div className="grid grid-cols-2 gap-2 mb-2">
@@ -574,7 +710,7 @@ export default function Index() {
                     <div key={i} className="grid grid-cols-2 gap-2 items-center">
                       <input
                         className="h-8 bg-muted border border-border rounded-sm px-3 text-xs font-mono outline-none focus:border-[hsl(var(--green))] transition-colors"
-                        placeholder={i === 0 ? "ООО «Старая компания»" : "example.ru"}
+                        placeholder="ex-sound.ru"
                         value={row.from}
                         onChange={e => {
                           const next = [...replacerRows];
@@ -585,7 +721,7 @@ export default function Index() {
                       <div className="flex gap-2">
                         <input
                           className="flex-1 h-8 bg-muted border border-border rounded-sm px-3 text-xs font-mono outline-none focus:border-[hsl(var(--green))] transition-colors"
-                          placeholder={i === 0 ? "ООО «Новая компания»" : "newsite.ru"}
+                          placeholder="acoustics.si"
                           value={row.to}
                           onChange={e => {
                             const next = [...replacerRows];
@@ -612,31 +748,15 @@ export default function Index() {
                 </div>
               </Panel>
 
-              <Panel className="p-4">
-                <SectionHeader title="Настройки языка" subtitle="Автоматическая локализация контента" />
-                <div className="grid grid-cols-3 gap-3">
-                  {[
-                    { label: "Исходный язык", opts: [["auto", "Авто-определение"], ["ru", "Русский"], ["en", "English"]] },
-                    { label: "Целевой язык",  opts: [["ru", "Русский"], ["en", "English"], ["de", "Deutsch"], ["fr", "Français"]] },
-                    { label: "Режим замены",  opts: [["full", "Полная замена"], ["meta", "Только мета"], ["off", "Отключено"]] },
-                  ].map(sel => (
-                    <div key={sel.label}>
-                      <label className="text-xs text-muted-foreground block mb-1">{sel.label}</label>
-                      <select className="w-full h-8 bg-muted border border-border rounded-sm px-2 text-xs font-mono text-foreground outline-none focus:border-[hsl(var(--green))] transition-colors">
-                        {sel.opts.map(([v, l]) => (
-                          <option key={v} value={v}>{l}</option>
-                        ))}
-                      </select>
-                    </div>
-                  ))}
-                </div>
-              </Panel>
-
               <div className="flex justify-between items-center">
-                <p className="text-xs text-muted-foreground font-mono">Правила применяются при экспорте</p>
-                <button className="h-8 px-4 bg-[hsl(var(--green))] text-black text-xs font-mono font-semibold rounded-sm flex items-center gap-1.5 hover:opacity-90 transition-opacity">
-                  <Icon name="Check" size={12} />
-                  Сохранить правила
+                <p className="text-xs text-muted-foreground font-mono">Правила применяются при скачивании файла</p>
+                <button
+                  onClick={handleExport}
+                  disabled={!parsed}
+                  className="h-8 px-4 bg-[hsl(var(--green))] text-black text-xs font-mono font-semibold rounded-sm flex items-center gap-1.5 hover:opacity-90 transition-opacity disabled:opacity-30 disabled:cursor-not-allowed"
+                >
+                  <Icon name="Download" size={12} />
+                  Скачать с заменами
                 </button>
               </div>
             </div>
@@ -647,8 +767,8 @@ export default function Index() {
       {/* Footer */}
       <footer className="border-t border-border">
         <div className="max-w-screen-xl mx-auto px-6 h-9 flex items-center justify-between text-xs font-mono text-muted-foreground/30">
-          <span>SiteParser Pro — автоматический парсер сайтов</span>
-          <span>Bitrix · HTML · CSS · JS · JSON · XML · CSV</span>
+          <span>SiteParser Pro — реальный парсинг и перевод</span>
+          <span>ex-sound.ru → acoustics.si · JSON · XML · CSV</span>
         </div>
       </footer>
     </div>
