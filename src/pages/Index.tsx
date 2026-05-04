@@ -538,7 +538,7 @@ export default function Index() {
                       <p className="text-xs font-mono text-muted-foreground/30">Журнал пуст — запустите парсинг</p>
                     </div>
                   ) : (
-                    logs.map(log => (
+                    logs.filter(log => log && log.level).map(log => (
                       <div key={log.id} className={`log-line ${log.level} animate-slide-in`}>
                         <span className="text-muted-foreground/30 mr-3 select-none">{log.ts}</span>
                         <span className="mr-2 opacity-50">[{log.level.toUpperCase()}]</span>
